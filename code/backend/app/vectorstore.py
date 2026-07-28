@@ -50,10 +50,19 @@ class VectorStore:
         return False
 
     # --- data ----------------------------------------------------------------
+    # Fields owned by the pipeline itself — everything else in the payload is
+    # caller-supplied metadata (title, product, effective date, ...) and is
+    # surfaced back under "metadata" in search() rather than hardcoded here.
+    _CORE_KEYS = {"text", "index", "strategy", "source", "ingested_at"}
+
     def upsert(self, chunks: list[str], vectors: list[list[float]], strategy: str,
-               source: str | None) -> list[str]:
-        ids = [str(uuid.uuid4()) for _ in chunks]
+               source: str | None, metadata: dict | None = None) -> list[str]:
+        source_label = source or "adhoc"
+        # Deterministic id (source + chunk index) instead of a random uuid4: re-ingesting
+        # the same source overwrites its previous points instead of piling up duplicates.
+        ids = [str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source_label}:{i}")) for i in range(len(chunks))]
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        meta = metadata or {}
         self.client.upsert(
             collection_name=self.collection,
             points=[
@@ -64,8 +73,9 @@ class VectorStore:
                         "text": text,
                         "index": i,
                         "strategy": strategy,
-                        "source": source or "adhoc",
+                        "source": source_label,
                         "ingested_at": now,
+                        **meta,
                     },
                 )
                 for i, (pid, text, vec) in enumerate(zip(ids, chunks, vectors))
@@ -73,21 +83,30 @@ class VectorStore:
         )
         return ids
 
-    def search(self, vector: list[float], top_k: int) -> list[dict]:
+    def search(self, vector: list[float], top_k: int, filters: dict | None = None) -> list[dict]:
+        query_filter = None
+        if filters:
+            query_filter = models.Filter(
+                must=[models.FieldCondition(key=k, match=models.MatchValue(value=v))
+                      for k, v in filters.items()]
+            )
         hits = self.client.query_points(
-            collection_name=self.collection, query=vector, limit=top_k, with_payload=True
+            collection_name=self.collection, query=vector, limit=top_k, with_payload=True,
+            query_filter=query_filter,
         ).points
-        return [
-            {
+        results = []
+        for h in hits:
+            payload = h.payload or {}
+            results.append({
                 "id": str(h.id),
                 "score": round(float(h.score), 4),
-                "text": (h.payload or {}).get("text", ""),
-                "index": (h.payload or {}).get("index"),
-                "strategy": (h.payload or {}).get("strategy"),
-                "source": (h.payload or {}).get("source"),
-            }
-            for h in hits
-        ]
+                "text": payload.get("text", ""),
+                "index": payload.get("index"),
+                "strategy": payload.get("strategy"),
+                "source": payload.get("source"),
+                "metadata": {k: v for k, v in payload.items() if k not in self._CORE_KEYS},
+            })
+        return results
 
     # --- introspection --------------------------------------------------------
     def info(self) -> dict:

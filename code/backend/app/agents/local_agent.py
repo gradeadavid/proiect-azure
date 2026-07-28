@@ -30,19 +30,31 @@ class AgentReply:
     completion_tokens: int | None = None
 
 
-def build_user_prompt(question: str, chunks: list[dict]) -> str:
-    """Question alone, or question + retrieved passages."""
-    if not chunks:
-        return question
-    context = "\n\n".join(
-        f"[{i + 1}] (score {c['score']}) {c['text']}" for i, c in enumerate(chunks)
-    )
-    return (
-        "CONTEXT — retrieved passages, most similar first:\n"
-        f"{context}\n\n"
-        "QUESTION:\n"
-        f"{question}"
-    )
+def build_user_prompt(question: str, chunks: list[dict], *, retrieval_attempted: bool = False) -> str:
+    """Question alone, or question + retrieved passages.
+
+    When RAG ran but every hit fell below the score threshold, `chunks` is empty
+    yet retrieval *was* attempted — say so explicitly instead of silently falling
+    back to an unaugmented prompt, so the persona's refusal rule has something to
+    act on rather than guessing why there is no context.
+    """
+    if chunks:
+        context = "\n\n".join(
+            f"[{i + 1}] (score {c['score']}) {c['text']}" for i, c in enumerate(chunks)
+        )
+        return (
+            "CONTEXT — retrieved passages, most similar first:\n"
+            f"{context}\n\n"
+            "QUESTION:\n"
+            f"{question}"
+        )
+    if retrieval_attempted:
+        return (
+            "CONTEXT — retrieval ran but found nothing above the relevance threshold.\n\n"
+            "QUESTION:\n"
+            f"{question}"
+        )
+    return question
 
 
 def run(
@@ -50,10 +62,12 @@ def run(
     question: str,
     chunks: list[dict] | None = None,
     temperature: float | None = None,
+    retrieval_attempted: bool = False,
 ) -> AgentReply:
     chunks = chunks or []
-    system = persona.system_prompt(grounded=bool(chunks))
-    user = build_user_prompt(question, chunks)
+    grounded = bool(chunks) or retrieval_attempted
+    system = persona.system_prompt(grounded=grounded)
+    user = build_user_prompt(question, chunks, retrieval_attempted=retrieval_attempted)
 
     # precedence: explicit request value > persona file > .env default
     temp = temperature if temperature is not None else (

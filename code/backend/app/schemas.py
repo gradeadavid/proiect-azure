@@ -52,6 +52,11 @@ class IngestRequest(ChunkRequest):
     }]}}
 
     source: Optional[str] = Field(None, description="Label stored with every chunk (e.g. 'cards-faq')")
+    metadata: Optional[dict] = Field(
+        None,
+        description="Extra fields stored with every chunk (e.g. title, product, effective, "
+                    "version) — enables metadata filtering at search time",
+    )
 
 
 class IngestResponse(BaseModel):
@@ -73,6 +78,12 @@ class SearchRequest(BaseModel):
 
     query: str = Field(..., min_length=1)
     top_k: Optional[int] = Field(None, ge=1, le=50)
+    min_score: Optional[float] = Field(
+        None, ge=0, le=1, description="Drop hits below this cosine score. Defaults to MIN_SCORE from .env"
+    )
+    filters: Optional[dict[str, str]] = Field(
+        None, description="Exact-match metadata filter, e.g. {\"product\": \"carduri\"}"
+    )
 
 
 class SearchHit(BaseModel):
@@ -82,6 +93,7 @@ class SearchHit(BaseModel):
     strategy: Optional[str] = None
     source: Optional[str] = None
     id: str
+    metadata: dict = Field(default_factory=dict, description="title/product/effective/version, if provided at ingest time")
 
 
 class SearchResponse(BaseModel):
@@ -90,6 +102,10 @@ class SearchResponse(BaseModel):
     embedding_model: dict
     query_embedding_preview: list[float]
     hits: list[SearchHit]
+    min_score_used: float = Field(description="The relevance floor applied to this search")
+    notice: Optional[str] = Field(
+        None, description="Set when every candidate hit fell below min_score — nothing relevant found"
+    )
 
 
 # --- generation ---------------------------------------------------------------
@@ -104,6 +120,12 @@ class AskRequest(BaseModel):
     question: str = Field(..., min_length=1)
     use_rag: bool = Field(True, description="false = plain LLM; true = retrieve then augment")
     top_k: Optional[int] = Field(None, ge=1, le=50)
+    min_score: Optional[float] = Field(
+        None, ge=0, le=1, description="Drop retrieved hits below this cosine score. Defaults to MIN_SCORE from .env"
+    )
+    filters: Optional[dict[str, str]] = Field(
+        None, description="Exact-match metadata filter applied to retrieval, e.g. {\"product\": \"carduri\"}"
+    )
     temperature: Optional[float] = Field(None, ge=0, le=2)
     agent: Optional[str] = Field(
         None,

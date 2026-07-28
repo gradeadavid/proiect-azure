@@ -269,7 +269,7 @@ def ingest(req: IngestRequest) -> IngestResponse:
         store.ensure_collection(dim)
     except DimensionMismatch as e:
         raise HTTPException(status_code=409, detail=str(e))
-    ids = store.upsert(pieces, vectors, p["strategy"], req.source)
+    ids = store.upsert(pieces, vectors, p["strategy"], req.source, req.metadata)
     return IngestResponse(
         strategy=p["strategy"], count=len(pieces), vector_dimension=dim,
         embedding_preview=[round(x, 5) for x in vectors[0][:8]],
@@ -299,12 +299,18 @@ def search(req: SearchRequest) -> SearchResponse:
     if not store.info()["exists"]:
         raise HTTPException(status_code=404, detail="Collection is empty — POST /ingest first.")
     top_k = req.top_k or settings.top_k
+    min_score = req.min_score if req.min_score is not None else settings.min_score
     qvec = _embed([req.query])[0]
-    hits = store.search(qvec, top_k)
+    hits = store.search(qvec, top_k, filters=req.filters)
+    kept = [h for h in hits if h["score"] >= min_score]
+    notice = None
+    if hits and not kept:
+        notice = (f"{len(hits)} candidate(s) found, all below min_score={min_score} — "
+                  f"nothing relevant found for this query.")
     return SearchResponse(
         query=req.query, top_k=top_k, embedding_model=_embedder().describe(),
         query_embedding_preview=[round(x, 5) for x in qvec[:8]],
-        hits=[SearchHit(**h) for h in hits],
+        hits=[SearchHit(**h) for h in kept], min_score_used=min_score, notice=notice,
     )
 
 
@@ -341,7 +347,7 @@ def ask(req: AskRequest) -> AskResponse:
         if not hosted_only:
             raise HTTPException(status_code=404, detail=str(e))
 
-    # ---- retrieval (unchanged behaviour, now feeding the agent) -------------
+    # ---- retrieval (now with a relevance floor and metadata filters) --------
     if req.use_rag:
         _require_qdrant()
         if not store.info()["exists"]:
@@ -349,8 +355,10 @@ def ask(req: AskRequest) -> AskResponse:
                                 detail="use_rag=true but the collection is empty — POST /ingest first, "
                                        "or set use_rag=false for a plain LLM answer.")
         top_k = req.top_k or settings.top_k
+        min_score = req.min_score if req.min_score is not None else settings.min_score
         qvec = _embed([req.question])[0]
-        retrieved = [SearchHit(**h) for h in store.search(qvec, top_k)]
+        hits = store.search(qvec, top_k, filters=req.filters)
+        retrieved = [SearchHit(**h) for h in hits if h["score"] >= min_score]
 
     chunks = [h.model_dump() for h in retrieved]
     mode = mode_requested
@@ -362,7 +370,8 @@ def ask(req: AskRequest) -> AskResponse:
         elif mode == "foundry":
             reply = foundry_agent.run(persona, req.question, chunks)
         else:
-            reply = local_agent.run(persona, req.question, chunks, temperature=req.temperature)
+            reply = local_agent.run(persona, req.question, chunks, temperature=req.temperature,
+                                    retrieval_attempted=req.use_rag)
     except foundry_agent.FoundryUnavailable as e:
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
